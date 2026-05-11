@@ -108,7 +108,7 @@ export default function ClipCard({ clip }: { clip: Clip }) {
               Anpassen
             </button>
             <a
-              href={clip.download_url ? `http://localhost:8000${clip.download_url}` : "#"}
+              href={clip.download_url ? `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}${clip.download_url}` : "#"}
               download
               className="btn-primary py-2 px-4 rounded-lg text-xs flex items-center gap-1.5"
             >
