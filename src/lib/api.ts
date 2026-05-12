@@ -102,7 +102,7 @@ export async function dlInfo(url: string): Promise<VideoInfo> {
   return res.json();
 }
 
-export async function dlGetUrl(url: string): Promise<{ url: string }> {
+export async function dlGetUrl(url: string): Promise<{ url: string; title?: string; thumbnail?: string }> {
   const res = await fetch(`${BASE}/api/dl/url`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
