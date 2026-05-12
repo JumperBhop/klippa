@@ -111,74 +111,36 @@ export default function DownloadPage() {
     }
   };
 
-  // ── Schritt 2a: YouTube-Download (CDN-URL via RapidAPI → Browser lädt direkt) ──
+  // ── Schritt 2a: YouTube-Download (via Cobalt-Tunnel → Content-Disposition:attachment) ──
   const handleImportYouTube = useCallback(async () => {
     if (!url) return;
     setState("importing");
     setError("");
-    setImportProgress(20);
-    setImportStep("Download-Link wird abgerufen…");
+    setImportProgress(30);
+    setImportStep("Download wird vorbereitet…");
 
     try {
-      const { url: cdnUrl, title: cdnTitle, thumbnail: cdnThumb } = await dlGetUrl(url);
-      const filename = cdnTitle ? `${cdnTitle.slice(0, 80).replace(/[/\\?%*:|"<>]/g, "_")}.mp4` : "youtube-video.mp4";
+      const { url: dlUrl, title: dlTitle, thumbnail: dlThumb } = await dlGetUrl(url);
 
-      setImportProgress(40);
-      setImportStep("Video wird heruntergeladen…");
+      setImportProgress(80);
+      setImportStep("Download startet…");
 
-      // Try fetch → blob → same-origin download (forces file download, not video tab)
-      let downloadStarted = false;
-      try {
-        const resp = await fetch(cdnUrl);
-        if (!resp.ok) throw new Error(`CDN: ${resp.status}`);
-        const contentLength = resp.headers.get("content-length");
-        const total = contentLength ? parseInt(contentLength) : 0;
-        const reader = resp.body!.getReader();
-        const chunks: Uint8Array<ArrayBuffer>[] = [];
-        let received = 0;
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          chunks.push(value);
-          received += value.length;
-          if (total > 0) {
-            setImportProgress(40 + Math.round((received / total) * 55));
-          } else {
-            setImportProgress(p => Math.min(p + 2, 94));
-          }
-        }
-        const blob = new Blob(chunks, { type: "video/mp4" });
-        const blobUrl = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = blobUrl;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
-        downloadStarted = true;
-      } catch {
-        // CORS or network error — fall back to direct navigation in new tab
-      }
-
-      if (!downloadStarted) {
-        // Fallback: open in new tab (user can right-click → Save)
-        const a = document.createElement("a");
-        a.href = cdnUrl;
-        a.target = "_blank";
-        a.rel = "noopener noreferrer";
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-      }
+      // The cobalt tunnel URL has Content-Disposition:attachment → browser downloads directly
+      const a = document.createElement("a");
+      a.href = dlUrl;
+      // download attribute as hint (honored since Content-Disposition forces it anyway)
+      if (dlTitle) a.download = `${dlTitle.slice(0, 80).replace(/[/\\?%*:|"<>]/g, "_")}.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
 
       setImportProgress(100);
       setImported({
-        title:     cdnTitle ?? info?.title ?? "YouTube-Video",
+        title:     dlTitle ?? info?.title ?? "YouTube-Video",
         duration:  info?.duration ?? 0,
-        thumbnail: cdnThumb ?? info?.thumbnail ?? null,
+        thumbnail: dlThumb ?? info?.thumbnail ?? null,
         platform:  "youtube",
-        cdnUrl,
+        cdnUrl:    dlUrl,
       });
       setState("done");
     } catch (e: any) {
