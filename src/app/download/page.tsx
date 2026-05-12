@@ -83,7 +83,6 @@ export default function DownloadPage() {
     setError("");
     try {
       const { url: cdnUrl } = await dlGetUrl(url);
-      // Open CDN URL as download in the browser — no server bandwidth
       const a = document.createElement("a");
       a.href = cdnUrl;
       a.download = info?.title ? `${info.title.slice(0, 60)}.mp4` : "video.mp4";
@@ -96,6 +95,11 @@ export default function DownloadPage() {
       const msg: string = e.message ?? "";
       if (msg.includes("COBALT_NOT_CONFIGURED")) {
         setError("SETUP_REQUIRED");
+      } else if (
+        (platform === "youtube" || platform === "tiktok") &&
+        (msg.includes("login") || msg.includes("bot") || msg.includes("unavailable") || msg.includes("400"))
+      ) {
+        setError("SERVER_BLOCKED");
       } else {
         setError(msg);
       }
@@ -151,7 +155,7 @@ export default function DownloadPage() {
           <div className="glass rounded-2xl p-6 md:p-8 text-left">
 
             {/* Error banner */}
-            {error && error !== "SETUP_REQUIRED" && (
+            {error && error !== "SETUP_REQUIRED" && error !== "SERVER_BLOCKED" && (
               <div className="mb-5 glass rounded-xl px-4 py-3 border border-red-500/30 text-red-400 text-sm">
                 {error}
               </div>
@@ -166,8 +170,29 @@ export default function DownloadPage() {
                 </p>
               </div>
             )}
+            {error === "SERVER_BLOCKED" && (
+              <div className="mb-5 glass rounded-xl px-4 py-4 border border-amber-500/30">
+                <div className="flex items-start gap-3">
+                  <svg className="flex-shrink-0 mt-0.5" width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <path d="M8 1.5L14.5 13H1.5L8 1.5z" stroke="#f59e0b" strokeWidth="1.3" strokeLinejoin="round"/>
+                    <path d="M8 6v4M8 11.5h.01" stroke="#f59e0b" strokeWidth="1.3" strokeLinecap="round"/>
+                  </svg>
+                  <div>
+                    <p className="text-amber-400 text-sm font-medium mb-1">
+                      {platform === "youtube" ? "YouTube" : "TikTok"} blockiert Server-Downloads
+                    </p>
+                    <p className="text-chalk-dim text-xs leading-relaxed">
+                      {platform === "youtube"
+                        ? "YouTube erlaubt keine Downloads von Server-IPs. Lade das Video direkt über cobalt.tools herunter — selbe Funktion, läuft in deinem Browser."
+                        : "TikTok blockiert Downloads von unserem Server. Nutze cobalt.tools direkt im Browser."
+                      }
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
 
-            {state === "idle" || (state === "error" && error !== "SETUP_REQUIRED") ? (
+            {state === "idle" || (state === "error" && error !== "SETUP_REQUIRED" && error !== "SERVER_BLOCKED") ? (
               <div className="flex flex-col gap-4">
                 <div className="relative flex items-center">
                   {platform && (
@@ -272,7 +297,7 @@ export default function DownloadPage() {
                   </div>
                 )}
               </div>
-            ) : state === "error" && error === "SETUP_REQUIRED" ? (
+            ) : (state === "error" && (error === "SETUP_REQUIRED" || error === "SERVER_BLOCKED")) ? (
               <div className="flex flex-col gap-4">
                 <div className="relative flex items-center">
                   {platform && (
@@ -284,16 +309,22 @@ export default function DownloadPage() {
                     {url.slice(0, 50)}{url.length > 50 ? "…" : ""}
                   </div>
                 </div>
+                {/* cobalt.tools with URL pre-filled */}
                 <a
                   href={`https://cobalt.tools/`}
                   target="_blank"
+                  rel="noopener noreferrer"
                   className="btn-primary w-full py-4 rounded-xl text-base text-center flex items-center justify-center gap-2"
+                  onClick={() => {
+                    // Copy URL to clipboard so user can paste it on cobalt.tools
+                    try { navigator.clipboard.writeText(url); } catch {}
+                  }}
                 >
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
                     <path d="M7 2H3a1 1 0 00-1 1v10a1 1 0 001 1h10a1 1 0 001-1V9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
                     <path d="M10 2h4v4M14 2L8 8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
-                  <span>Direkt auf cobalt.tools herunterladen</span>
+                  <span>Auf cobalt.tools herunterladen (Link wird kopiert)</span>
                 </a>
                 <button onClick={reset} className="btn-ghost py-2.5 rounded-xl text-sm">
                   Zurück

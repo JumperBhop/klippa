@@ -396,18 +396,155 @@ async def dl_info(request: _Request):
         }
 
 
+# ── YouTube InnerTube fallback (ANDROID client, no signature needed) ─────────
+def _is_youtube(url: str) -> bool:
+    return "youtube.com" in url or "youtu.be" in url
+
+def _youtube_innertube_url(video_url: str) -> str:
+    """
+    Get a direct mp4 URL via YouTube InnerTube API.
+    Tries multiple clients until one works.
+    """
+    import re as _re, json as _j, urllib.request as _ur, http.cookiejar as _cj
+
+    vid = _re.search(r'(?:v=|youtu\.be/|shorts/|embed/)([a-zA-Z0-9_-]{11})', video_url)
+    if not vid:
+        raise ValueError("Ungültige YouTube-URL: keine Video-ID gefunden")
+    video_id = vid.group(1)
+
+    # Load cookies if available (for authenticated access)
+    cookie_header = ""
+    try:
+        from pipeline import COOKIES_FILE
+        if COOKIES_FILE.exists():
+            jar = _cj.MozillaCookieJar(str(COOKIES_FILE))
+            jar.load(ignore_discard=True, ignore_expires=True)
+            cookie_header = "; ".join(
+                f"{c.name}={c.value}" for c in jar
+                if "youtube.com" in (c.domain or "") or "google.com" in (c.domain or "")
+            )
+    except Exception:
+        pass
+
+    # Clients to try in order
+    clients = [
+        {
+            "name": "ANDROID",
+            "version": "19.09.37",
+            "key": "3",
+            "ua": "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
+            "sdk": 30,
+        },
+        {
+            "name": "ANDROID_TESTSUITE",
+            "version": "1.9",
+            "key": "30",
+            "ua": "com.google.android.youtube/1.9 (Linux; U; Android 11) gzip",
+            "sdk": 30,
+        },
+        {
+            "name": "IOS",
+            "version": "19.09.3",
+            "key": "5",
+            "ua": "com.google.ios.youtube/19.09.3 (iPhone14,3; U; CPU iOS 15_6 like Mac OS X)",
+            "sdk": None,
+        },
+    ]
+
+    last_error = "Keine Video-URL gefunden"
+    for client in clients:
+        try:
+            ctx = {
+                "client": {
+                    "clientName": client["name"],
+                    "clientVersion": client["version"],
+                    "hl": "en",
+                    "gl": "US",
+                    "utcOffsetMinutes": 0,
+                }
+            }
+            if client.get("sdk"):
+                ctx["client"]["androidSdkVersion"] = client["sdk"]
+
+            payload = _j.dumps({"videoId": video_id, "context": ctx}).encode()
+
+            headers = {
+                "Content-Type": "application/json",
+                "User-Agent": client["ua"],
+                "X-YouTube-Client-Name": client["key"],
+                "X-YouTube-Client-Version": client["version"],
+            }
+            if cookie_header:
+                headers["Cookie"] = cookie_header
+
+            req = _ur.Request(
+                "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+                data=payload, headers=headers, method="POST"
+            )
+            with _ur.urlopen(req, timeout=15) as r:
+                data = _j.loads(r.read())
+
+            ps_status = data.get("playabilityStatus", {}).get("status", "UNKNOWN")
+            if ps_status != "OK":
+                reason = data.get("playabilityStatus", {}).get("reason", ps_status)
+                last_error = f"YouTube: {reason}"
+                continue
+
+            formats = data.get("streamingData", {}).get("formats", [])
+            # Combined mp4 formats (video+audio), best quality first
+            mp4 = sorted(
+                [f for f in formats if f.get("url") and "mp4" in f.get("mimeType", "")],
+                key=lambda f: f.get("height", 0), reverse=True
+            )
+            if mp4:
+                return mp4[0]["url"]
+
+            # Any combined format
+            any_fmt = [f for f in formats if f.get("url")]
+            if any_fmt:
+                return any_fmt[0]["url"]
+
+            last_error = f"Client {client['name']}: keine direkte URL"
+
+        except Exception as ex:
+            last_error = str(ex)
+            continue
+
+    raise ValueError(last_error)
+
+
 # ── POST /api/dl/url ──────────────────────────────────────────────────────────
 @app.post("/api/dl/url")
 async def dl_url(request: _Request):
     """
-    Ask cobalt for a direct CDN download URL and return it to the browser.
-    The browser then downloads directly from the CDN — no server bandwidth used.
+    Get a direct CDN download URL.
+    For YouTube: tries cobalt first, falls back to InnerTube ANDROID API.
+    For other platforms: cobalt only.
     """
     body = await request.json()
     url = body.get("url", "")
     if not url.startswith("http"):
         raise HTTPException(status_code=400, detail="Ungültige URL")
 
+    # ── YouTube: cobalt first, InnerTube fallback ────────────────────────────
+    if _is_youtube(url):
+        # Try cobalt
+        try:
+            data = await _cobalt_fetch(url)
+            direct_url = _cobalt_pick_url(data)
+            return {"url": direct_url}
+        except Exception:
+            pass  # cobalt failed → try InnerTube
+
+        # Fallback: YouTube InnerTube ANDROID_TESTSUITE
+        try:
+            loop = asyncio.get_event_loop()
+            direct_url = await loop.run_in_executor(None, _youtube_innertube_url, url)
+            return {"url": direct_url, "source": "innertube"}
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    # ── Other platforms: cobalt only ─────────────────────────────────────────
     try:
         data = await _cobalt_fetch(url)
         direct_url = _cobalt_pick_url(data)
