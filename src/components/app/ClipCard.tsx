@@ -3,6 +3,8 @@
 import { useState } from "react";
 import CustomizationPanel from "./CustomizationPanel";
 
+const API = "https://178.105.137.126.nip.io";
+
 export interface Clip {
   id: string;
   title: string;
@@ -16,59 +18,55 @@ export interface Clip {
 
 export default function ClipCard({ clip }: { clip: Clip }) {
   const [panelOpen, setPanelOpen] = useState(false);
+  const [playing, setPlaying] = useState(false);
 
-  const scoreColor =
-    clip.viralScore >= 90
-      ? "#22c55e"
-      : clip.viralScore >= 75
-      ? "#a855f7"
-      : clip.viralScore >= 60
-      ? "#f59e0b"
-      : "#ef4444";
+  const videoUrl = clip.download_url ? `${API}${clip.download_url}` : null;
 
   return (
     <>
       <div className="clip-card glass rounded-2xl overflow-hidden flex flex-col group">
-        {/* Thumbnail */}
+        {/* Thumbnail / Player */}
         <div className="relative aspect-[9/16] bg-void-3 overflow-hidden">
-          {/* Gradient placeholder */}
-          <div
-            className="absolute inset-0"
-            style={{
-              background: `linear-gradient(135deg, ${clip.thumbnail}22 0%, #0a0a0a 100%)`,
-            }}
-          />
-          <div
-            className="absolute inset-0 flex items-center justify-center"
-            style={{
-              background: `radial-gradient(circle at center, ${clip.thumbnail}33 0%, transparent 70%)`,
-            }}
-          >
-            <div className="w-12 h-12 glass-violet rounded-full flex items-center justify-center">
-              <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-                <path d="M6 4.5l9 4.5-9 4.5V4.5z" fill="#a855f7"/>
-              </svg>
-            </div>
-          </div>
+          {playing && videoUrl ? (
+            <video
+              src={videoUrl}
+              autoPlay
+              controls
+              className="absolute inset-0 w-full h-full object-cover"
+              onEnded={() => setPlaying(false)}
+            />
+          ) : (
+            <>
+              <div
+                className="absolute inset-0"
+                style={{ background: `linear-gradient(135deg, ${clip.thumbnail}22 0%, #0a0a0a 100%)` }}
+              />
+              <button
+                onClick={() => setPlaying(true)}
+                className="absolute inset-0 flex items-center justify-center group/play"
+                style={{ background: `radial-gradient(circle at center, ${clip.thumbnail}33 0%, transparent 70%)` }}
+              >
+                <div className="w-12 h-12 glass-violet rounded-full flex items-center justify-center transition-transform duration-200 group-hover/play:scale-110">
+                  <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                    <path d="M6 4.5l9 4.5-9 4.5V4.5z" fill="#a855f7"/>
+                  </svg>
+                </div>
+              </button>
+            </>
+          )}
 
           {/* Timecode */}
-          <div className="absolute bottom-2 right-2 glass px-2 py-1 rounded-md">
-            <span
-              className="text-[10px] text-chalk font-mono"
-              style={{ fontFamily: "'JetBrains Mono', monospace" }}
-            >
-              {clip.duration}
-            </span>
-          </div>
+          {!playing && (
+            <div className="absolute bottom-2 right-2 glass px-2 py-1 rounded-md">
+              <span className="text-[10px] text-chalk font-mono" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+                {clip.duration}
+              </span>
+            </div>
+          )}
 
           {/* Viral score badge */}
-          <div
-            className="absolute top-2 left-2 viral-score px-2.5 py-1 rounded-lg"
-          >
-            <span
-              className="text-xs font-bold text-white font-mono"
-              style={{ fontFamily: "'Clash Display', sans-serif" }}
-            >
+          <div className="absolute top-2 left-2 viral-score px-2.5 py-1 rounded-lg">
+            <span className="text-xs font-bold text-white" style={{ fontFamily: "'Clash Display', sans-serif" }}>
               {clip.viralScore}
             </span>
           </div>
@@ -77,9 +75,7 @@ export default function ClipCard({ clip }: { clip: Clip }) {
         {/* Content */}
         <div className="p-4 flex flex-col gap-3 flex-1">
           <div>
-            <h3 className="text-sm font-semibold text-chalk leading-snug mb-1 line-clamp-2">
-              {clip.title}
-            </h3>
+            <h3 className="text-sm font-semibold text-chalk leading-snug mb-1 line-clamp-2">{clip.title}</h3>
             <span className="text-xs text-chalk-dim font-mono" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
               {clip.timeCode}
             </span>
@@ -107,19 +103,21 @@ export default function ClipCard({ clip }: { clip: Clip }) {
               </svg>
               Anpassen
             </button>
-            <a
-              href={clip.download_url ? `${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}${clip.download_url}` : "#"}
-              download
-              className="btn-primary py-2 px-4 rounded-lg text-xs flex items-center gap-1.5"
-            >
-              <span className="flex items-center gap-1.5">
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                  <path d="M6 1v7M3 6l3 3 3-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
-                  <path d="M2 10h8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
-                </svg>
-                Download
-              </span>
-            </a>
+            {videoUrl && (
+              <a
+                href={videoUrl}
+                download
+                className="btn-primary py-2 px-4 rounded-lg text-xs flex items-center gap-1.5"
+              >
+                <span className="flex items-center gap-1.5">
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                    <path d="M6 1v7M3 6l3 3 3-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+                    <path d="M2 10h8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+                  </svg>
+                  Download
+                </span>
+              </a>
+            )}
           </div>
         </div>
       </div>

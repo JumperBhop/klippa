@@ -21,19 +21,6 @@ export default function Hero() {
           aria-hidden="true"
         />
 
-        {/* Badge */}
-        <div className="reveal glass-violet px-4 py-2 rounded-full flex items-center gap-2 mb-8" data-delay="0">
-          <span
-            className="w-1.5 h-1.5 rounded-full bg-violet-light flex-shrink-0"
-            style={{ animation: "pulseGlow 2s ease-in-out infinite" }}
-          />
-          <span
-            className="text-xs tracking-widest uppercase text-chalk-dim"
-            style={{ fontFamily: "'JetBrains Mono', monospace" }}
-          >
-            KI-gestütztes Video-Editing
-          </span>
-        </div>
 
         {/* Headline */}
         <div className="reveal text-center w-full" data-delay="80">
@@ -112,16 +99,6 @@ export default function Hero() {
         </div>
       </div>
 
-      {/* Scroll indicator — absolute at bottom of section */}
-      <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2" style={{ opacity: 0.35 }}>
-        <span
-          className="text-xs tracking-widest uppercase"
-          style={{ fontFamily: "'JetBrains Mono', monospace", color: "#666" }}
-        >
-          Scroll
-        </span>
-        <div className="w-px h-12 bg-gradient-to-b from-violet to-transparent" />
-      </div>
     </section>
   );
 }

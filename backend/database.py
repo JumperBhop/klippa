@@ -16,8 +16,15 @@ def init_db():
     with _lock:
         conn = get_conn()
         conn.executescript("""
+            CREATE TABLE IF NOT EXISTS users (
+                id          TEXT PRIMARY KEY,
+                plan        TEXT NOT NULL DEFAULT 'gratis',
+                credits     INTEGER NOT NULL DEFAULT 3,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
             CREATE TABLE IF NOT EXISTS jobs (
                 id          TEXT PRIMARY KEY,
+                user_id     TEXT,
                 status      TEXT NOT NULL DEFAULT 'pending',
                 progress    INTEGER NOT NULL DEFAULT 0,
                 step        TEXT NOT NULL DEFAULT '',
@@ -43,12 +50,55 @@ def init_db():
         conn.close()
 
 
-def create_job(job_id: str, youtube_url: str = None, file_path: str = None):
+def get_or_create_user(user_id: str) -> dict:
+    with _lock:
+        conn = get_conn()
+        row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not row:
+            conn.execute("INSERT INTO users (id) VALUES (?)", (user_id,))
+            conn.commit()
+            row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        conn.close()
+        return dict(row)
+
+
+def get_user(user_id: str) -> dict | None:
+    with _lock:
+        conn = get_conn()
+        row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+
+def deduct_credit(user_id: str) -> bool:
+    with _lock:
+        conn = get_conn()
+        row = conn.execute("SELECT credits FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not row or row["credits"] <= 0:
+            conn.close()
+            return False
+        conn.execute("UPDATE users SET credits = credits - 1 WHERE id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+        return True
+
+
+def get_user_jobs(user_id: str) -> list:
+    with _lock:
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT * FROM jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 20", (user_id,)
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+
+def create_job(job_id: str, youtube_url: str = None, file_path: str = None, user_id: str = None):
     with _lock:
         conn = get_conn()
         conn.execute(
-            "INSERT INTO jobs (id, youtube_url, file_path) VALUES (?, ?, ?)",
-            (job_id, youtube_url, file_path),
+            "INSERT INTO jobs (id, user_id, youtube_url, file_path) VALUES (?, ?, ?, ?)",
+            (job_id, user_id, youtube_url, file_path),
         )
         conn.commit()
         conn.close()

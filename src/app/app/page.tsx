@@ -6,7 +6,9 @@ import UploadArea from "@/components/app/UploadArea";
 import ProgressSteps from "@/components/app/ProgressSteps";
 import ClipCard, { type Clip } from "@/components/app/ClipCard";
 import UpgradeModal from "@/components/app/UpgradeModal";
-import { getStatus, getClips, zipUrl, type ClipResult, type JobStatus } from "@/lib/api";
+import StyleModal from "@/components/app/StyleModal";
+import { getStatus, getClips, zipUrl, getUserInfo, type ClipResult, type JobStatus } from "@/lib/api";
+import { useUser } from "@clerk/nextjs";
 
 const COLORS = ["#7c3aed","#4f46e5","#a855f7","#6d28d9","#8b5cf6"];
 
@@ -92,9 +94,16 @@ function RealProgressSteps({ status }: { status: JobStatus | null }) {
 }
 
 export default function AppPage() {
+  const { user } = useUser();
   const [state, setState] = useState<AppState>("idle");
   const [showUpgrade, setShowUpgrade] = useState(false);
-  const [credits] = useState(10);
+  const [credits, setCredits] = useState<number>(3);
+
+  useEffect(() => {
+    if (!user) return;
+    getUserInfo(user.id).then(info => setCredits(info.credits)).catch(() => {});
+  }, [user]);
+  const [pendingUpload, setPendingUpload] = useState<{ job_id?: string; youtube_url?: string } | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
   const [clips, setClips] = useState<Clip[]>([]);
@@ -143,6 +152,7 @@ export default function AppPage() {
     setClips([]);
     setErrorMsg("");
     setState("idle");
+    setPendingUpload(null);
   };
 
   return (
@@ -185,7 +195,7 @@ export default function AppPage() {
           {/* Upload area */}
           {state === "idle" && (
             <div className="max-w-2xl">
-              <UploadArea onJobStarted={handleJobStarted} />
+              <UploadArea onUploaded={(params) => setPendingUpload({ job_id: params.job_id })} />
               {credits <= 3 && (
                 <div className="mt-4 glass-violet rounded-xl p-4 flex items-center justify-between gap-4">
                   <div className="flex items-center gap-2">
@@ -204,9 +214,39 @@ export default function AppPage() {
 
           {/* Error state */}
           {state === "error" && (
-            <div className="max-w-2xl glass rounded-xl p-6 border border-red-500/20">
-              <p className="text-red-400 text-sm mb-4">{errorMsg}</p>
-              <button onClick={handleReset} className="btn-ghost px-5 py-2.5 rounded-xl text-sm">Nochmal versuchen</button>
+            <div className="max-w-2xl space-y-3">
+              {errorMsg.includes("YouTube-Download nicht möglich") ? (
+                <div className="glass rounded-xl p-6 border border-amber-500/20">
+                  <div className="flex items-start gap-3 mb-4">
+                    <svg className="flex-shrink-0 mt-0.5" width="18" height="18" viewBox="0 0 18 18" fill="none">
+                      <path d="M9 2L16.5 15H1.5L9 2z" stroke="#f59e0b" strokeWidth="1.5" strokeLinejoin="round"/>
+                      <path d="M9 7v4M9 13h.01" stroke="#f59e0b" strokeWidth="1.5" strokeLinecap="round"/>
+                    </svg>
+                    <div>
+                      <p className="text-amber-400 text-sm font-medium mb-1">YouTube-Link nicht unterstützt</p>
+                      <p className="text-chalk-dim text-xs leading-relaxed">
+                        YouTube blockiert Downloads von unserem Server. Bitte lade das Video zuerst herunter und lade es dann direkt hoch.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="glass-violet rounded-lg p-4 mb-4">
+                    <p className="text-xs text-chalk-dim font-medium mb-2">So geht's:</p>
+                    <ol className="text-xs text-chalk-dim space-y-1.5 list-none">
+                      <li className="flex gap-2"><span className="text-violet-light font-bold">1.</span> Installiere <a href="https://github.com/yt-dlp/yt-dlp" target="_blank" className="text-violet-light hover:underline">yt-dlp</a> oder <a href="https://4k-download.com" target="_blank" className="text-violet-light hover:underline">4K Downloader</a></li>
+                      <li className="flex gap-2"><span className="text-violet-light font-bold">2.</span> Lade das YouTube-Video herunter</li>
+                      <li className="flex gap-2"><span className="text-violet-light font-bold">3.</span> Lade die MP4-Datei hier hoch</li>
+                    </ol>
+                  </div>
+                  <button onClick={handleReset} className="btn-primary px-5 py-2.5 rounded-xl text-sm w-full">
+                    <span>Video hochladen</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="glass rounded-xl p-6 border border-red-500/20">
+                  <p className="text-red-400 text-sm mb-4">{errorMsg}</p>
+                  <button onClick={handleReset} className="btn-ghost px-5 py-2.5 rounded-xl text-sm">Nochmal versuchen</button>
+                </div>
+              )}
             </div>
           )}
 
@@ -260,6 +300,13 @@ export default function AppPage() {
       </main>
 
       {showUpgrade && <UpgradeModal onClose={() => setShowUpgrade(false)} />}
+      {pendingUpload && (
+        <StyleModal
+          upload={pendingUpload}
+          onStarted={(id) => { setPendingUpload(null); handleJobStarted(id); }}
+          onCancel={() => setPendingUpload(null)}
+        />
+      )}
     </>
   );
 }

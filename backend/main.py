@@ -1,33 +1,65 @@
 import os
 import uuid
 import zipfile
+import shutil
+import asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from database import init_db, create_job, update_job, get_job, get_clips, get_clip
+from database import init_db, create_job, update_job, get_job, get_clips, get_clip, get_or_create_user, get_user, get_user_jobs, deduct_credit
 from pipeline import run_pipeline, TMP_BASE
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+COBALT_API_KEY = os.environ.get("COBALT_API_KEY", "")          # optional – only needed for external instances
+COBALT_API_URL = os.environ.get("COBALT_API_URL", "http://172.17.0.1:9000/")  # self-hosted cobalt (Docker bridge)
+CLIP_MAX_AGE_HOURS = 24
+
+
+def cleanup_old_jobs():
+    """Delete job folders older than CLIP_MAX_AGE_HOURS to free disk space."""
+    if not TMP_BASE.exists():
+        return
+    cutoff = datetime.now() - timedelta(hours=CLIP_MAX_AGE_HOURS)
+    for job_dir in TMP_BASE.iterdir():
+        if not job_dir.is_dir():
+            continue
+        try:
+            mtime = datetime.fromtimestamp(job_dir.stat().st_mtime)
+            if mtime < cutoff:
+                shutil.rmtree(job_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
+async def cleanup_loop():
+    """Run cleanup every hour in background."""
+    while True:
+        await asyncio.sleep(3600)
+        cleanup_old_jobs()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     TMP_BASE.mkdir(parents=True, exist_ok=True)
+    cleanup_old_jobs()  # clean on startup
+    task = asyncio.create_task(cleanup_loop())
     yield
+    task.cancel()
 
 
 app = FastAPI(title="Klippa API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -51,9 +83,17 @@ async def upload_video(file: UploadFile = File(...)):
 
 
 # ── POST /api/process ───────────────────────────────────────────────────────
+class StyleSettings(BaseModel):
+    subtitle_style: str = "tiktok-bold"
+    text_color: str = "#ffffff"
+    watermark: bool = True
+
+
 class ProcessRequest(BaseModel):
     job_id: str | None = None
     youtube_url: str | None = None
+    user_id: str | None = None
+    style: StyleSettings = StyleSettings()
 
 
 @app.post("/api/process")
@@ -61,11 +101,20 @@ async def process(req: ProcessRequest, background_tasks: BackgroundTasks):
     if not OPENAI_API_KEY:
         raise HTTPException(status_code=500, detail="OPENAI_API_KEY not set")
 
+    # Credit check
+    if req.user_id:
+        user = get_or_create_user(req.user_id)
+        if user["credits"] <= 0:
+            raise HTTPException(status_code=402, detail="Keine Credits mehr. Bitte upgraden.")
+        watermark = user["plan"] == "gratis"
+    else:
+        watermark = True
+
     if req.youtube_url and not req.job_id:
         job_id = str(uuid.uuid4())
         job_dir = TMP_BASE / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
-        create_job(job_id, youtube_url=req.youtube_url)
+        create_job(job_id, youtube_url=req.youtube_url, user_id=req.user_id)
     elif req.job_id:
         job_id = req.job_id
         if not get_job(job_id):
@@ -73,8 +122,28 @@ async def process(req: ProcessRequest, background_tasks: BackgroundTasks):
     else:
         raise HTTPException(status_code=400, detail="Provide job_id or youtube_url")
 
-    background_tasks.add_task(run_pipeline, job_id, OPENAI_API_KEY)
+    if req.user_id:
+        deduct_credit(req.user_id)
+
+    style = req.style.model_dump()
+    style["watermark"] = watermark
+    background_tasks.add_task(run_pipeline, job_id, OPENAI_API_KEY, style)
     return {"job_id": job_id, "status": "processing"}
+
+
+# ── POST /api/upload-audio/{job_id} ────────────────────────────────────────
+@app.post("/api/upload-audio/{job_id}")
+async def upload_audio(job_id: str, file: UploadFile = File(...)):
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job_dir = TMP_BASE / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    ext = Path(file.filename or "audio.mp3").suffix or ".mp3"
+    save_path = job_dir / f"music{ext}"
+    content = await file.read()
+    save_path.write_bytes(content)
+    return {"ok": True}
 
 
 # ── GET /api/status/{job_id} ────────────────────────────────────────────────
@@ -150,7 +219,211 @@ async def download_zip(job_id: str):
     )
 
 
+# ── GET /api/user/{user_id} ─────────────────────────────────────────────────
+@app.get("/api/user/{user_id}")
+async def get_user_info(user_id: str):
+    user = get_or_create_user(user_id)
+    return {"user_id": user_id, "plan": user["plan"], "credits": user["credits"]}
+
+
+# ── GET /api/user/{user_id}/jobs ─────────────────────────────────────────────
+@app.get("/api/user/{user_id}/jobs")
+async def get_jobs_for_user(user_id: str):
+    jobs = get_user_jobs(user_id)
+    return jobs
+
+
+# ── POST /api/admin/cookies ──────────────────────────────────────────────────
+ADMIN_KEY = os.environ.get("ADMIN_KEY", "klippa-admin-2026")
+COBALT_COOKIES_FILE = Path(__file__).parent / "cobalt_cookies.json"
+
+
+def _netscape_to_cobalt(netscape_text: str) -> dict:
+    """
+    Convert Netscape cookie file format to cobalt's cookies.json format.
+    cobalt format: {"youtube": ["NAME1=VAL1; NAME2=VAL2; ..."], "tiktok": [...]}
+    """
+    domain_map: dict[str, list[str]] = {}
+    for line in netscape_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 7:
+            continue
+        domain, _, _path, _secure, _expiry, name, value = parts[:7]
+        # Normalise domain → service key
+        domain = domain.lstrip(".")
+        if "youtube.com" in domain or "google.com" in domain or "googlevideo.com" in domain:
+            key = "youtube"
+        elif "tiktok.com" in domain:
+            key = "tiktok"
+        elif "instagram.com" in domain:
+            key = "instagram"
+        elif "twitter.com" in domain or "x.com" in domain or "twimg.com" in domain:
+            key = "twitter"
+        else:
+            continue
+        domain_map.setdefault(key, []).append(f"{name}={value}")
+
+    return {svc: ["; ".join(pairs)] for svc, pairs in domain_map.items()}
+
+
+@app.post("/api/admin/cookies")
+async def upload_cookies(file: UploadFile = File(...), key: str = ""):
+    if key != ADMIN_KEY:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    from pipeline import COOKIES_FILE
+    content = await file.read()
+    COOKIES_FILE.write_bytes(content)
+
+    # Also convert to cobalt JSON format and save
+    try:
+        cobalt_json = _netscape_to_cobalt(content.decode("utf-8", errors="ignore"))
+        import json as _json
+        COBALT_COOKIES_FILE.write_text(_json.dumps(cobalt_json, indent=2, ensure_ascii=False), encoding="utf-8")
+        services = list(cobalt_json.keys())
+    except Exception as e:
+        services = []
+
+    return {"ok": True, "size": len(content), "cobalt_services": services}
+
+
+@app.get("/api/admin/cobalt-cookies")
+async def get_cobalt_cookies(key: str = ""):
+    """Return the current cobalt_cookies.json content for download/inspection."""
+    if key != ADMIN_KEY:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if not COBALT_COOKIES_FILE.exists():
+        raise HTTPException(status_code=404, detail="No cobalt cookies file. Upload youtube_cookies.txt first via /api/admin/cookies")
+    import json as _json
+    data = _json.loads(COBALT_COOKIES_FILE.read_text(encoding="utf-8"))
+    return data
+
+
+# ── Cobalt helper ────────────────────────────────────────────────────────────
+from fastapi import Request as _Request
+import urllib.request as _urllib_req
+import urllib.error as _urllib_err
+import json as _json_mod
+
+async def _cobalt_fetch(url: str) -> dict:
+    """Call self-hosted cobalt API and return parsed JSON. Raises ValueError on failure."""
+    payload = _json_mod.dumps({"url": url, "videoQuality": "1080", "youtubeVideoCodec": "h264"}).encode()
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if COBALT_API_KEY:
+        headers["Authorization"] = f"Api-Key {COBALT_API_KEY}"
+
+    req = _urllib_req.Request(COBALT_API_URL, data=payload, headers=headers, method="POST")
+    try:
+        loop = asyncio.get_event_loop()
+        def _call():
+            with _urllib_req.urlopen(req, timeout=30) as r:
+                return _json_mod.loads(r.read())
+        return await loop.run_in_executor(None, _call)
+    except _urllib_err.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")
+        raise ValueError(f"cobalt error {e.code}: {body[:200]}")
+    except _urllib_err.URLError as e:
+        raise ValueError(f"cobalt unreachable: {e}")
+
+
+def _cobalt_pick_url(data: dict) -> str:
+    """Extract the best direct download URL from a cobalt response."""
+    status = data.get("status", "")
+    if status in ("redirect", "stream", "tunnel"):
+        u = data.get("url")
+        if u:
+            return u
+    if status == "picker":
+        items = data.get("picker", [])
+        video_items = [i for i in items if i.get("type") == "video"] or items
+        if video_items:
+            return video_items[0]["url"]
+    code = data.get("error", {}).get("code", status)
+    raise ValueError(f"cobalt: {code}")
+
+
+# ── POST /api/dl/info ────────────────────────────────────────────────────────
+@app.post("/api/dl/info")
+async def dl_info(request: _Request):
+    """Return video title/thumbnail/platform via cobalt (no download)."""
+    body = await request.json()
+    url = body.get("url", "")
+    if not url.startswith("http"):
+        raise HTTPException(status_code=400, detail="Ungültige URL")
+
+    # Detect platform from URL for instant response even without cobalt
+    def _detect(u: str) -> str:
+        if "youtube.com" in u or "youtu.be" in u:   return "youtube"
+        if "tiktok.com" in u or "vm.tiktok.com" in u: return "tiktok"
+        if "instagram.com" in u:                       return "instagram"
+        if "twitter.com" in u or "x.com" in u:        return "twitter"
+        return "other"
+
+    platform = _detect(url)
+
+    # Try yt-dlp extract_info (fast, no download) for metadata
+    import yt_dlp
+    loop = asyncio.get_event_loop()
+
+    def _extract():
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as ydl:
+            return ydl.extract_info(url, download=False)
+
+    try:
+        info = await loop.run_in_executor(None, _extract)
+        return {
+            "title":    info.get("title", "Video"),
+            "thumbnail": info.get("thumbnail"),
+            "duration": info.get("duration"),
+            "uploader": info.get("uploader") or info.get("channel"),
+            "platform": platform,
+            "cobalt_ready": True,
+        }
+    except Exception:
+        # Metadata unavailable from Hetzner IP — return minimal info
+        return {
+            "title": None,
+            "thumbnail": None,
+            "duration": None,
+            "uploader": None,
+            "platform": platform,
+            "cobalt_ready": True,
+        }
+
+
+# ── POST /api/dl/url ──────────────────────────────────────────────────────────
+@app.post("/api/dl/url")
+async def dl_url(request: _Request):
+    """
+    Ask cobalt for a direct CDN download URL and return it to the browser.
+    The browser then downloads directly from the CDN — no server bandwidth used.
+    """
+    body = await request.json()
+    url = body.get("url", "")
+    if not url.startswith("http"):
+        raise HTTPException(status_code=400, detail="Ungültige URL")
+
+    try:
+        data = await _cobalt_fetch(url)
+        direct_url = _cobalt_pick_url(data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {"url": direct_url}
+
+
 # ── GET /health ──────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"status": "ok", "openai_key_set": bool(OPENAI_API_KEY)}
+    from pipeline import COOKIES_FILE
+    return {
+        "status": "ok",
+        "openai_key_set": bool(OPENAI_API_KEY),
+        "cookies": COOKIES_FILE.exists(),
+        "cobalt_cookies": COBALT_COOKIES_FILE.exists(),
+    }
