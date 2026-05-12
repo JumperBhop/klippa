@@ -110,49 +110,36 @@ export default function DownloadPage() {
     }
   };
 
-  // ── Schritt 2a: YouTube-Import (über RapidAPI, landet auf unserem Server) ──
+  // ── Schritt 2a: YouTube-Download (CDN-URL via RapidAPI → Browser lädt direkt) ──
   const handleImportYouTube = useCallback(async () => {
     if (!url) return;
     setState("importing");
     setError("");
-    setImportProgress(5);
-    setImportStep("YouTube-Video wird importiert…");
+    setImportProgress(50);
+    setImportStep("Download-Link wird abgerufen…");
 
-    let jobId: string;
     try {
-      const res = await startImport(url);
-      jobId = res.job_id;
+      const { url: cdnUrl, title: cdnTitle, thumbnail: cdnThumb } = await dlGetUrl(url);
+      // Browser-Download direkt von CDN-URL
+      const a = document.createElement("a");
+      a.href = cdnUrl;
+      a.download = cdnTitle ? `${cdnTitle.slice(0, 60)}.mp4` : "youtube-video.mp4";
+      a.target = "_blank";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setImported({
+        title:     cdnTitle ?? info?.title ?? "YouTube-Video",
+        duration:  info?.duration ?? 0,
+        thumbnail: cdnThumb ?? info?.thumbnail ?? null,
+        platform:  "youtube",
+      });
+      setState("done");
     } catch (e: any) {
-      setError(e.message ?? "Import fehlgeschlagen");
+      setError(e.message ?? "Download fehlgeschlagen");
       setState("error");
-      return;
     }
-
-    // Polling alle 2 Sekunden
-    stopPoll();
-    pollRef.current = setInterval(async () => {
-      try {
-        const status: ImportStatus = await getImportStatus(jobId);
-        setImportProgress(status.progress ?? 0);
-        setImportStep(status.step ?? "");
-
-        if (status.status === "done" && status.result) {
-          stopPoll();
-          setImported({
-            title:     status.result.title,
-            duration:  status.result.duration,
-            thumbnail: status.result.thumbnail,
-            platform:  status.result.platform,
-          });
-          setState("done");
-        } else if (status.status === "error") {
-          stopPoll();
-          setError(status.error ?? "Unbekannter Fehler");
-          setState("error");
-        }
-      } catch { /* transient — ignore */ }
-    }, 2000);
-  }, [url]);
+  }, [url, info]);
 
   // ── Schritt 2b: Direkt-Download für TikTok/Instagram (via Cobalt/yt-dlp) ─
   const handleDirectDownload = async () => {
@@ -382,13 +369,10 @@ export default function DownloadPage() {
                   </div>
                   <div>
                     <p className="text-chalk font-medium text-sm">
-                      {isYouTube ? "YouTube-Video erfolgreich importiert!" : "Download gestartet!"}
+                      Download gestartet!
                     </p>
                     <p className="text-chalk-dim text-xs mt-0.5">
-                      {isYouTube
-                        ? "Du kannst das Video jetzt in den Clip-Editor laden."
-                        : "Das Video wird in deinen Downloads gespeichert."
-                      }
+                      Das Video wird in deinen Downloads gespeichert.
                     </p>
                   </div>
                 </div>

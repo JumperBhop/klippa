@@ -538,23 +538,50 @@ async def dl_url(request: _Request):
     if not url.startswith("http"):
         raise HTTPException(status_code=400, detail="Ungültige URL")
 
-    # ── YouTube: cobalt first, InnerTube fallback ────────────────────────────
+    # ── YouTube: RapidAPI → beste CDN-URL zurückgeben (Browser lädt direkt) ──
     if _is_youtube(url):
-        # Try cobalt
+        if RAPIDAPI_KEY:
+            try:
+                import re as _re
+                vid = _re.search(r'(?:v=|youtu\.be/|shorts/|embed/)([a-zA-Z0-9_-]{11})', url)
+                if vid:
+                    video_id = vid.group(1)
+                    loop = asyncio.get_event_loop()
+                    def _rapid_fetch():
+                        import urllib.request as _ur, json as _j
+                        _headers = {
+                            "X-RapidAPI-Key": RAPIDAPI_KEY,
+                            "X-RapidAPI-Host": os.environ.get("RAPIDAPI_YT_HOST", "youtube-media-downloader.p.rapidapi.com"),
+                            "User-Agent": "Mozilla/5.0",
+                            "Accept": "application/json",
+                        }
+                        host = os.environ.get("RAPIDAPI_YT_HOST", "youtube-media-downloader.p.rapidapi.com")
+                        _req = _ur.Request(f"https://{host}/v2/video/details?videoId={video_id}", headers=_headers)
+                        with _ur.urlopen(_req, timeout=15) as _r:
+                            return _j.loads(_r.read())
+                    data = await loop.run_in_executor(None, _rapid_fetch)
+                    items = data.get("videos", {}).get("items", [])
+                    # Bevorzuge mit Audio, dann beste Qualität
+                    with_audio = [i for i in items if i.get("hasAudio") and i.get("url")]
+                    all_items  = [i for i in items if i.get("url")]
+                    preferred  = with_audio or all_items
+                    PREF = ["1080p","720p","480p","360p","240p","144p"]
+                    preferred.sort(key=lambda i: next((j for j,q in enumerate(PREF) if q in str(i.get("quality",""))), 999))
+                    if preferred:
+                        return {"url": preferred[0]["url"], "source": "rapidapi",
+                                "title": data.get("title"), "thumbnail": (data.get("thumbnails") or [{}])[-1].get("url")}
+            except Exception:
+                pass  # RapidAPI failed → cobalt fallback
+
+        # Fallback: cobalt
         try:
             data = await _cobalt_fetch(url)
             direct_url = _cobalt_pick_url(data)
             return {"url": direct_url}
         except Exception:
-            pass  # cobalt failed → try InnerTube
+            pass
 
-        # Fallback: YouTube InnerTube ANDROID_TESTSUITE
-        try:
-            loop = asyncio.get_event_loop()
-            direct_url = await loop.run_in_executor(None, _youtube_innertube_url, url)
-            return {"url": direct_url, "source": "innertube"}
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="YouTube-Download nicht verfügbar. Bitte RAPIDAPI_KEY setzen.")
 
     # ── Other platforms: cobalt only ─────────────────────────────────────────
     try:
