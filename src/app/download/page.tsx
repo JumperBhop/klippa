@@ -111,28 +111,55 @@ export default function DownloadPage() {
     }
   };
 
-  // ── Schritt 2a: YouTube-Download (via Cobalt-Tunnel → Content-Disposition:attachment) ──
+  // ── Schritt 2a: YouTube-Download (Cobalt-Tunnel hat CORS → fetch+blob → echter Download) ──
   const handleImportYouTube = useCallback(async () => {
     if (!url) return;
     setState("importing");
     setError("");
-    setImportProgress(30);
+    setImportProgress(10);
     setImportStep("Download wird vorbereitet…");
 
     try {
-      const { url: dlUrl, title: dlTitle, thumbnail: dlThumb } = await dlGetUrl(url);
+      const { url: dlUrl, title: dlTitle, thumbnail: dlThumb, filename: dlFilename } = await dlGetUrl(url);
 
-      setImportProgress(80);
-      setImportStep("Download startet…");
+      const filename = dlFilename
+        || (dlTitle ? `${dlTitle.slice(0, 80).replace(/[/\\?%*:|"<>]/g, "_")}.mp4` : "youtube-video.mp4");
 
-      // The cobalt tunnel URL has Content-Disposition:attachment → browser downloads directly
+      setImportProgress(20);
+      setImportStep("Video wird heruntergeladen…");
+
+      // Cobalt tunnel has Access-Control-Allow-Origin:* → fetch works cross-origin
+      // Blob URL is same-origin → download attribute is honored → file downloads directly
+      const resp = await fetch(dlUrl);
+      if (!resp.ok) throw new Error(`Download-Fehler: ${resp.status}`);
+
+      const contentLength = resp.headers.get("content-length");
+      const total = contentLength ? parseInt(contentLength) : 0;
+      const reader = resp.body!.getReader();
+      const chunks: Uint8Array<ArrayBuffer>[] = [];
+      let received = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.length;
+        if (total > 0) {
+          setImportProgress(20 + Math.round((received / total) * 75));
+        } else {
+          setImportProgress(p => Math.min(p + 1, 94));
+        }
+      }
+
+      const blob = new Blob(chunks, { type: "video/mp4" });
+      const blobUrl = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = dlUrl;
-      // download attribute as hint (honored since Content-Disposition forces it anyway)
-      if (dlTitle) a.download = `${dlTitle.slice(0, 80).replace(/[/\\?%*:|"<>]/g, "_")}.mp4`;
+      a.href = blobUrl;
+      a.download = filename;
       document.body.appendChild(a);
       a.click();
       a.remove();
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
 
       setImportProgress(100);
       setImported({
