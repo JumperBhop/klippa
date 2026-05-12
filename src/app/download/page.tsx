@@ -69,6 +69,7 @@ interface ImportedVideo {
   duration: number;
   thumbnail: string | null;
   platform: string;
+  cdnUrl?: string;
 }
 
 export default function DownloadPage() {
@@ -133,6 +134,7 @@ export default function DownloadPage() {
         duration:  info?.duration ?? 0,
         thumbnail: cdnThumb ?? info?.thumbnail ?? null,
         platform:  "youtube",
+        cdnUrl,
       });
       setState("done");
     } catch (e: any) {
@@ -369,16 +371,30 @@ export default function DownloadPage() {
                   </div>
                   <div>
                     <p className="text-chalk font-medium text-sm">
-                      Download gestartet!
+                      Download-Link bereit!
                     </p>
                     <p className="text-chalk-dim text-xs mt-0.5">
-                      Das Video wird in deinen Downloads gespeichert.
+                      Das Video wird in einem neuen Tab geöffnet — dort rechtsklick → &quot;Speichern unter&quot;.
                     </p>
                   </div>
                 </div>
 
-                <div className="flex gap-3">
-                  {isYouTube && (
+                <div className="flex gap-3 flex-wrap">
+                  {displayInfo?.cdnUrl && (
+                    <a
+                      href={displayInfo.cdnUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="btn-primary flex-1 py-3 rounded-xl text-sm text-center flex items-center justify-center gap-2"
+                    >
+                      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                        <path d="M8 2v8M5 8l3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                        <path d="M2 12h12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                      </svg>
+                      <span>Video öffnen / herunterladen</span>
+                    </a>
+                  )}
+                  {isYouTube && !displayInfo?.cdnUrl && (
                     <a href="/app" className="btn-primary flex-1 py-3 rounded-xl text-sm text-center flex items-center justify-center gap-2">
                       <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
                         <path d="M7.5 1l4.5 2.5v5L7.5 11 3 8.5v-5L7.5 1z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
