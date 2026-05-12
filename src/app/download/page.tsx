@@ -116,19 +116,63 @@ export default function DownloadPage() {
     if (!url) return;
     setState("importing");
     setError("");
-    setImportProgress(50);
+    setImportProgress(20);
     setImportStep("Download-Link wird abgerufen…");
 
     try {
       const { url: cdnUrl, title: cdnTitle, thumbnail: cdnThumb } = await dlGetUrl(url);
-      // Browser-Download direkt von CDN-URL
-      const a = document.createElement("a");
-      a.href = cdnUrl;
-      a.download = cdnTitle ? `${cdnTitle.slice(0, 60)}.mp4` : "youtube-video.mp4";
-      a.target = "_blank";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
+      const filename = cdnTitle ? `${cdnTitle.slice(0, 80).replace(/[/\\?%*:|"<>]/g, "_")}.mp4` : "youtube-video.mp4";
+
+      setImportProgress(40);
+      setImportStep("Video wird heruntergeladen…");
+
+      // Try fetch → blob → same-origin download (forces file download, not video tab)
+      let downloadStarted = false;
+      try {
+        const resp = await fetch(cdnUrl);
+        if (!resp.ok) throw new Error(`CDN: ${resp.status}`);
+        const contentLength = resp.headers.get("content-length");
+        const total = contentLength ? parseInt(contentLength) : 0;
+        const reader = resp.body!.getReader();
+        const chunks: Uint8Array<ArrayBuffer>[] = [];
+        let received = 0;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          received += value.length;
+          if (total > 0) {
+            setImportProgress(40 + Math.round((received / total) * 55));
+          } else {
+            setImportProgress(p => Math.min(p + 2, 94));
+          }
+        }
+        const blob = new Blob(chunks, { type: "video/mp4" });
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = blobUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+        downloadStarted = true;
+      } catch {
+        // CORS or network error — fall back to direct navigation in new tab
+      }
+
+      if (!downloadStarted) {
+        // Fallback: open in new tab (user can right-click → Save)
+        const a = document.createElement("a");
+        a.href = cdnUrl;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }
+
+      setImportProgress(100);
       setImported({
         title:     cdnTitle ?? info?.title ?? "YouTube-Video",
         duration:  info?.duration ?? 0,
@@ -324,21 +368,18 @@ export default function DownloadPage() {
                 <Spinner size={40} />
                 <div className="text-center">
                   <p className="text-chalk font-medium text-sm mb-1">
-                    {isYouTube ? "YouTube-Video wird importiert…" : "Video wird heruntergeladen…"}
+                    {importStep || "Video wird heruntergeladen…"}
                   </p>
-                  <p className="text-chalk-dim text-xs">{importStep}</p>
                 </div>
-                {importProgress > 0 && (
-                  <div className="w-full max-w-xs">
-                    <div className="h-1 bg-white/5 rounded-full overflow-hidden">
-                      <div
-                        className="h-full rounded-full transition-all duration-700"
-                        style={{ width: `${importProgress}%`, background: "linear-gradient(90deg,#7c3aed,#a855f7)" }}
-                      />
-                    </div>
-                    <p className="text-[10px] text-chalk-dim mt-1 text-right font-mono">{importProgress}%</p>
+                <div className="w-full max-w-xs">
+                  <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
+                    <div
+                      className="h-full rounded-full transition-all duration-300"
+                      style={{ width: `${importProgress}%`, background: "linear-gradient(90deg,#7c3aed,#a855f7)" }}
+                    />
                   </div>
-                )}
+                  <p className="text-[10px] text-chalk-dim mt-1 text-right font-mono">{importProgress}%</p>
+                </div>
               </div>
             )}
 
@@ -371,10 +412,10 @@ export default function DownloadPage() {
                   </div>
                   <div>
                     <p className="text-chalk font-medium text-sm">
-                      Download-Link bereit!
+                      Download gestartet!
                     </p>
                     <p className="text-chalk-dim text-xs mt-0.5">
-                      Das Video wird in einem neuen Tab geöffnet — dort rechtsklick → &quot;Speichern unter&quot;.
+                      Das Video erscheint in deinen Downloads.
                     </p>
                   </div>
                 </div>
@@ -385,24 +426,15 @@ export default function DownloadPage() {
                       href={displayInfo.cdnUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="btn-primary flex-1 py-3 rounded-xl text-sm text-center flex items-center justify-center gap-2"
+                      className="btn-ghost flex-1 py-3 rounded-xl text-sm text-center flex items-center justify-center gap-2"
                     >
-                      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                        <path d="M8 2v8M5 8l3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                        <path d="M2 12h12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                      </svg>
-                      <span>Video öffnen / herunterladen</span>
-                    </a>
-                  )}
-                  {isYouTube && !displayInfo?.cdnUrl && (
-                    <a href="/app" className="btn-primary flex-1 py-3 rounded-xl text-sm text-center flex items-center justify-center gap-2">
                       <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
-                        <path d="M7.5 1l4.5 2.5v5L7.5 11 3 8.5v-5L7.5 1z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+                        <path d="M8 2v8M5 8l3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
                       </svg>
-                      <span>Im Clip-Editor öffnen</span>
+                      <span>Erneut herunterladen</span>
                     </a>
                   )}
-                  <button onClick={reset} className="btn-ghost flex-1 py-3 rounded-xl text-sm">
+                  <button onClick={reset} className="btn-primary flex-1 py-3 rounded-xl text-sm">
                     Weiteres Video
                   </button>
                 </div>

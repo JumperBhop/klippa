@@ -546,16 +546,24 @@ async def dl_url(request: _Request):
                 vid = _re.search(r'(?:v=|youtu\.be/|shorts/|embed/)([a-zA-Z0-9_-]{11})', url)
                 if vid:
                     video_id = vid.group(1)
+                    # Forward the client's real IP so YouTube signs the CDN URL for their IP
+                    client_ip = (
+                        request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+                        or request.headers.get("x-real-ip", "")
+                        or (request.client.host if request.client else "")
+                    )
                     loop = asyncio.get_event_loop()
                     def _rapid_fetch():
                         import urllib.request as _ur, json as _j
+                        host = os.environ.get("RAPIDAPI_YT_HOST", "youtube-media-downloader.p.rapidapi.com")
                         _headers = {
                             "X-RapidAPI-Key": RAPIDAPI_KEY,
-                            "X-RapidAPI-Host": os.environ.get("RAPIDAPI_YT_HOST", "youtube-media-downloader.p.rapidapi.com"),
+                            "X-RapidAPI-Host": host,
                             "User-Agent": "Mozilla/5.0",
                             "Accept": "application/json",
                         }
-                        host = os.environ.get("RAPIDAPI_YT_HOST", "youtube-media-downloader.p.rapidapi.com")
+                        if client_ip:
+                            _headers["X-Forwarded-For"] = client_ip
                         _req = _ur.Request(f"https://{host}/v2/video/details?videoId={video_id}", headers=_headers)
                         with _ur.urlopen(_req, timeout=15) as _r:
                             return _j.loads(_r.read())
@@ -569,7 +577,8 @@ async def dl_url(request: _Request):
                     preferred.sort(key=lambda i: next((j for j,q in enumerate(PREF) if q in str(i.get("quality",""))), 999))
                     if preferred:
                         return {"url": preferred[0]["url"], "source": "rapidapi",
-                                "title": data.get("title"), "thumbnail": (data.get("thumbnails") or [{}])[-1].get("url")}
+                                "title": data.get("title"), "thumbnail": (data.get("thumbnails") or [{}])[-1].get("url"),
+                                "client_ip": client_ip}
             except Exception:
                 pass  # RapidAPI failed → cobalt fallback
 
@@ -608,9 +617,49 @@ def _run_import_job(job_id: str, url: str):
         update_job(job_id, status="processing", progress=10,
                    step=f"{platform.capitalize()}-Video wird importiert…")
         try:
+            if platform == "youtube" and RAPIDAPI_KEY:
+                # YouTube: CDN-URL via RapidAPI holen, NICHT auf Server herunterladen
+                # (YouTube-CDN blockiert Hetzner-IPs — Browser lädt direkt)
+                import re as _re, urllib.request as _ur, json as _j
+                vid = _re.search(r'(?:v=|youtu\.be/|shorts/|embed/)([a-zA-Z0-9_-]{11})', url)
+                if not vid:
+                    raise ProviderError("Ungültige YouTube-URL")
+                video_id = vid.group(1)
+                host = os.environ.get("RAPIDAPI_YT_HOST", "youtube-media-downloader.p.rapidapi.com")
+                hdrs = {
+                    "X-RapidAPI-Key": RAPIDAPI_KEY,
+                    "X-RapidAPI-Host": host,
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept": "application/json",
+                }
+                req = _ur.Request(f"https://{host}/v2/video/details?videoId={video_id}", headers=hdrs)
+                with _ur.urlopen(req, timeout=15) as r:
+                    data = _j.loads(r.read())
+
+                title     = data.get("title") or f"YouTube {video_id}"
+                thumbs    = data.get("thumbnails") or []
+                thumbnail = thumbs[-1].get("url") if thumbs else None
+                dur_obj   = data.get("duration") or {}
+                duration  = int(dur_obj.get("secondsText") or dur_obj.get("seconds") or 0) if isinstance(dur_obj, dict) else int(dur_obj or 0)
+
+                items     = data.get("videos", {}).get("items", [])
+                PREF      = ["1080p","720p","480p","360p","240p","144p"]
+                with_audio = [i for i in items if i.get("hasAudio") and i.get("url")]
+                all_items  = [i for i in items if i.get("url")]
+                preferred  = with_audio or all_items
+                preferred.sort(key=lambda i: next((j for j,q in enumerate(PREF) if q in str(i.get("quality",""))), 999))
+                cdn_url = preferred[0]["url"] if preferred else None
+                if not cdn_url:
+                    raise ProviderError("Keine Download-URL verfügbar")
+
+                meta_step = f"done|{title.replace('|','_')}|{duration}|{(thumbnail or '').replace('|','_')}|youtube"
+                update_job(job_id, status="done", progress=100,
+                           step=meta_step, file_path=cdn_url, error=None)
+                return
+
+            # Andere Plattformen: yt-dlp (TikTok, Instagram, Twitter)
             job_dir = TMP_BASE / job_id
             result = await import_from_url(url, job_dir)
-            # Ergebnis-Metadaten im step-Feld codiert speichern (pipe-getrennt)
             meta_step = (
                 f"done"
                 f"|{result.title.replace('|','_')}"
@@ -618,14 +667,9 @@ def _run_import_job(job_id: str, url: str):
                 f"|{(result.thumbnail or '').replace('|','_')}"
                 f"|{result.platform}"
             )
-            update_job(
-                job_id,
-                status="done",
-                progress=100,
-                step=meta_step,
-                file_path=result.file_path,
-                error=None,
-            )
+            update_job(job_id, status="done", progress=100,
+                       step=meta_step, file_path=result.file_path, error=None)
+
         except ProviderError as e:
             update_job(job_id, status="error", error=str(e))
         except Exception as e:
