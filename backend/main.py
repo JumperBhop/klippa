@@ -369,33 +369,42 @@ async def dl_info(request: _Request):
 
     platform = _detect(url)
 
-    # Try yt-dlp extract_info (fast, no download) for metadata
+    # YouTube: yt-dlp ist von Hetzner-IPs geblockt → sofort Fallback zurückgeben
+    if platform == "youtube":
+        return {
+            "title": None, "thumbnail": None, "duration": None,
+            "uploader": None, "platform": platform, "cobalt_ready": True,
+        }
+
+    # Andere Plattformen: yt-dlp mit Timeout versuchen
     import yt_dlp
     loop = asyncio.get_event_loop()
 
     def _extract():
-        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as ydl:
+        opts = {
+            "quiet": True, "no_warnings": True, "skip_download": True,
+            "socket_timeout": 10,   # 10s Netzwerk-Timeout
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
             return ydl.extract_info(url, download=False)
 
     try:
-        info = await loop.run_in_executor(None, _extract)
+        info = await asyncio.wait_for(
+            loop.run_in_executor(None, _extract),
+            timeout=15.0,  # max 15s gesamt
+        )
         return {
-            "title":    info.get("title", "Video"),
+            "title":     info.get("title", "Video"),
             "thumbnail": info.get("thumbnail"),
-            "duration": info.get("duration"),
-            "uploader": info.get("uploader") or info.get("channel"),
-            "platform": platform,
+            "duration":  info.get("duration"),
+            "uploader":  info.get("uploader") or info.get("channel"),
+            "platform":  platform,
             "cobalt_ready": True,
         }
     except Exception:
-        # Metadata unavailable from Hetzner IP — return minimal info
         return {
-            "title": None,
-            "thumbnail": None,
-            "duration": None,
-            "uploader": None,
-            "platform": platform,
-            "cobalt_ready": True,
+            "title": None, "thumbnail": None, "duration": None,
+            "uploader": None, "platform": platform, "cobalt_ready": True,
         }
 
 
