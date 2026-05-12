@@ -2,7 +2,7 @@
 
 import { useState, useRef, useCallback } from "react";
 import Navbar from "@/components/Navbar";
-import { dlInfo, dlGetUrl, startImport, getImportStatus, type VideoInfo, type ImportStatus } from "@/lib/api";
+import { dlInfo, dlProxyUrl, startImport, getImportStatus, type VideoInfo, type ImportStatus } from "@/lib/api";
 
 // ── Plattform-Erkennung ────────────────────────────────────────────────────
 function detectPlatform(url: string) {
@@ -111,7 +111,7 @@ export default function DownloadPage() {
     }
   };
 
-  // ── Schritt 2a: YouTube-Download (Cobalt-Tunnel hat CORS → fetch+blob → echter Download) ──
+  // ── Schritt 2a: YouTube-Download (Backend-Proxy → CORS immer OK) ──────────
   const handleImportYouTube = useCallback(async () => {
     if (!url) return;
     setState("importing");
@@ -120,21 +120,32 @@ export default function DownloadPage() {
     setImportStep("Download wird vorbereitet…");
 
     try {
-      const { url: dlUrl, title: dlTitle, thumbnail: dlThumb, filename: dlFilename } = await dlGetUrl(url);
+      setImportProgress(15);
+      setImportStep("Verbindung wird aufgebaut…");
 
-      const filename = dlFilename
-        || (dlTitle ? `${dlTitle.slice(0, 80).replace(/[/\\?%*:|"<>]/g, "_")}.mp4` : "youtube-video.mp4");
+      // Backend-Proxy: Browser fetcht api.getklippa.de (CORS OK via unser Middleware).
+      // Backend holt cobalt-URL intern (kein Browser-CORS nötig).
+      // Keine NetworkError durch fehlende CORS-Header auf YouTube CDN / cobalt-Redirect.
+      const proxyUrl = dlProxyUrl(url);
+      const resp = await fetch(proxyUrl);
+      if (!resp.ok) {
+        let errMsg = `Download-Fehler: ${resp.status}`;
+        try { errMsg = (await resp.json()).detail ?? errMsg; } catch {}
+        throw new Error(errMsg);
+      }
+
+      const contentLength = resp.headers.get("content-length");
+      const total = contentLength ? parseInt(contentLength) : 0;
+
+      // Dateiname aus Content-Disposition-Header
+      const disposition = resp.headers.get("content-disposition") || "";
+      const fnMatch = disposition.match(/filename="([^"]+)"/);
+      const filename = fnMatch?.[1]
+        || (info?.title ? `${info.title.slice(0, 80).replace(/[/\\?%*:|"<>]/g, "_")}.mp4` : "youtube-video.mp4");
 
       setImportProgress(20);
       setImportStep("Video wird heruntergeladen…");
 
-      // Cobalt tunnel has Access-Control-Allow-Origin:* → fetch works cross-origin
-      // Blob URL is same-origin → download attribute is honored → file downloads directly
-      const resp = await fetch(dlUrl);
-      if (!resp.ok) throw new Error(`Download-Fehler: ${resp.status}`);
-
-      const contentLength = resp.headers.get("content-length");
-      const total = contentLength ? parseInt(contentLength) : 0;
       const reader = resp.body!.getReader();
       const chunks: Uint8Array<ArrayBuffer>[] = [];
       let received = 0;
@@ -163,11 +174,10 @@ export default function DownloadPage() {
 
       setImportProgress(100);
       setImported({
-        title:     dlTitle ?? info?.title ?? "YouTube-Video",
+        title:     info?.title ?? "YouTube-Video",
         duration:  info?.duration ?? 0,
-        thumbnail: dlThumb ?? info?.thumbnail ?? null,
+        thumbnail: info?.thumbnail ?? null,
         platform:  "youtube",
-        cdnUrl:    dlUrl,
       });
       setState("done");
     } catch (e: any) {
@@ -410,20 +420,7 @@ export default function DownloadPage() {
                 </div>
 
                 <div className="flex gap-3 flex-wrap">
-                  {displayInfo?.cdnUrl && (
-                    <a
-                      href={displayInfo.cdnUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="btn-ghost flex-1 py-3 rounded-xl text-sm text-center flex items-center justify-center gap-2"
-                    >
-                      <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
-                        <path d="M8 2v8M5 8l3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                      <span>Erneut herunterladen</span>
-                    </a>
-                  )}
-                  <button onClick={reset} className="btn-primary flex-1 py-3 rounded-xl text-sm">
+                    <button onClick={reset} className="btn-primary flex-1 py-3 rounded-xl text-sm">
                     Weiteres Video
                   </button>
                 </div>

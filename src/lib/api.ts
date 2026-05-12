@@ -117,6 +117,10 @@ export async function dlGetUrl(url: string): Promise<{ url: string; title?: stri
   return res.json();
 }
 
+export function dlProxyUrl(youtube_url: string): string {
+  return `${BASE}/api/dl/proxy?url=${encodeURIComponent(youtube_url)}`;
+}
+
 export function downloadUrl(clip_id: string): string {
   return `${BASE}/api/download/${clip_id}`;
 }
