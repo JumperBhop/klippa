@@ -14,10 +14,13 @@ from pydantic import BaseModel
 
 from database import init_db, create_job, update_job, get_job, get_clips, get_clip, get_or_create_user, get_user, get_user_jobs, deduct_credit
 from pipeline import run_pipeline, TMP_BASE
+from import_service import import_from_url, detect_platform
+from providers.base import ProviderError
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-COBALT_API_KEY = os.environ.get("COBALT_API_KEY", "")          # optional – only needed for external instances
-COBALT_API_URL = os.environ.get("COBALT_API_URL", "http://172.17.0.1:9000/")  # self-hosted cobalt (Docker bridge)
+COBALT_API_KEY = os.environ.get("COBALT_API_KEY", "")
+COBALT_API_URL = os.environ.get("COBALT_API_URL", "http://172.17.0.1:9000/")
+RAPIDAPI_KEY   = os.environ.get("RAPIDAPI_KEY", "")
 CLIP_MAX_AGE_HOURS = 24
 
 
@@ -552,6 +555,111 @@ async def dl_url(request: _Request):
         raise HTTPException(status_code=400, detail=str(e))
 
     return {"url": direct_url}
+
+
+# ── POST /api/import ─────────────────────────────────────────────────────────
+class ImportRequest(BaseModel):
+    url: str
+    user_id: str | None = None
+
+
+def _run_import_job(job_id: str, url: str):
+    """Läuft im Background-Thread: importiert Video und aktualisiert Job-Status."""
+    import asyncio as _asyncio
+
+    async def _do():
+        platform = detect_platform(url)
+        update_job(job_id, status="processing", progress=10,
+                   step=f"{platform.capitalize()}-Video wird importiert…")
+        try:
+            job_dir = TMP_BASE / job_id
+            result = await import_from_url(url, job_dir)
+            # Ergebnis-Metadaten im step-Feld codiert speichern (pipe-getrennt)
+            meta_step = (
+                f"done"
+                f"|{result.title.replace('|','_')}"
+                f"|{result.duration}"
+                f"|{(result.thumbnail or '').replace('|','_')}"
+                f"|{result.platform}"
+            )
+            update_job(
+                job_id,
+                status="done",
+                progress=100,
+                step=meta_step,
+                file_path=result.file_path,
+                error=None,
+            )
+        except ProviderError as e:
+            update_job(job_id, status="error", error=str(e))
+        except Exception as e:
+            update_job(job_id, status="error", error=f"Unbekannter Fehler: {str(e)[:200]}")
+
+    _asyncio.run(_do())
+
+
+@app.post("/api/import")
+async def import_video(req: ImportRequest, background_tasks: BackgroundTasks):
+    """
+    Startet einen Video-Import-Job.
+    YouTube → RapidAPI | TikTok/Instagram → yt-dlp
+    """
+    url = req.url.strip()
+    if not url.startswith("http"):
+        raise HTTPException(status_code=400, detail="Ungültige URL")
+
+    platform = detect_platform(url)
+
+    # Für YouTube: prüfen ob API-Key vorhanden
+    if platform == "youtube" and not RAPIDAPI_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="YouTube-Import nicht verfügbar: RAPIDAPI_KEY fehlt."
+        )
+
+    job_id = str(uuid.uuid4())
+    job_dir = TMP_BASE / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    # Job in DB anlegen
+    create_job(job_id, youtube_url=url, user_id=req.user_id)
+    update_job(job_id, status="processing", progress=5,
+               step=f"{platform.capitalize()}-Video wird importiert…")
+
+    background_tasks.add_task(_run_import_job, job_id, url)
+    return {"job_id": job_id, "status": "processing", "platform": platform}
+
+
+@app.get("/api/import/{job_id}")
+async def get_import_status(job_id: str):
+    """Status eines Import-Jobs + Ergebnis wenn fertig."""
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Import-Job nicht gefunden")
+
+    response = {
+        "job_id": job_id,
+        "status": job["status"],
+        "progress": job["progress"],
+        "step": job["step"],
+        "error": job.get("error"),
+        "platform": detect_platform(job.get("youtube_url") or ""),
+    }
+
+    # Wenn fertig: Metadaten aus dem step-Feld extrahieren
+    if job["status"] == "done" and job.get("step", "").startswith("done|"):
+        parts = job["step"].split("|", 4)
+        # done | title | duration | thumbnail | platform
+        if len(parts) >= 5:
+            response["result"] = {
+                "title":     parts[1],
+                "duration":  int(parts[2]) if parts[2].isdigit() else 0,
+                "thumbnail": parts[3] or None,
+                "platform":  parts[4],
+                "file_path": job.get("file_path", ""),
+            }
+
+    return response
 
 
 # ── GET /health ──────────────────────────────────────────────────────────────

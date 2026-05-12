@@ -124,3 +124,42 @@ export function downloadUrl(clip_id: string): string {
 export function zipUrl(job_id: string): string {
   return `${BASE}/api/download/${job_id}/zip`;
 }
+
+// ── Import API ────────────────────────────────────────────────────────────────
+
+export interface ImportStatus {
+  job_id: string;
+  status: "processing" | "done" | "error";
+  progress: number;
+  step: string;
+  error?: string;
+  platform: string;
+  result?: {
+    title: string;
+    duration: number;
+    thumbnail: string | null;
+    platform: string;
+    file_path: string;
+  };
+}
+
+export async function startImport(url: string, user_id?: string): Promise<{ job_id: string; platform: string }> {
+  const res = await fetch(`${BASE}/api/import`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url, user_id }),
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    let msg = txt;
+    try { msg = JSON.parse(txt).detail ?? txt; } catch {}
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
+export async function getImportStatus(job_id: string): Promise<ImportStatus> {
+  const res = await fetch(`${BASE}/api/import/${job_id}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}

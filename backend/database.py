@@ -104,18 +104,22 @@ def create_job(job_id: str, youtube_url: str = None, file_path: str = None, user
         conn.close()
 
 
-def update_job(job_id: str, status: str = None, progress: int = None, step: str = None, error: str = None):
+def update_job(
+    job_id: str,
+    status: str = None,
+    progress: int = None,
+    step: str = None,
+    error: str = None,
+    file_path: str = None,
+):
     with _lock:
         conn = get_conn()
         fields, vals = [], []
-        if status is not None:
-            fields.append("status = ?"); vals.append(status)
-        if progress is not None:
-            fields.append("progress = ?"); vals.append(progress)
-        if step is not None:
-            fields.append("step = ?"); vals.append(step)
-        if error is not None:
-            fields.append("error = ?"); vals.append(error)
+        if status    is not None: fields.append("status = ?");    vals.append(status)
+        if progress  is not None: fields.append("progress = ?");  vals.append(progress)
+        if step      is not None: fields.append("step = ?");      vals.append(step)
+        if error     is not None: fields.append("error = ?");     vals.append(error)
+        if file_path is not None: fields.append("file_path = ?"); vals.append(file_path)
         if fields:
             vals.append(job_id)
             conn.execute(f"UPDATE jobs SET {', '.join(fields)} WHERE id = ?", vals)

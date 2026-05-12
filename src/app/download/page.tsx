@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useCallback } from "react";
 import Navbar from "@/components/Navbar";
-import { dlInfo, dlGetUrl, type VideoInfo } from "@/lib/api";
+import { dlInfo, dlGetUrl, startImport, getImportStatus, type VideoInfo, type ImportStatus } from "@/lib/api";
 
+// ── Plattform-Erkennung ────────────────────────────────────────────────────
 function detectPlatform(url: string) {
   if (url.includes("youtube.com") || url.includes("youtu.be")) return "youtube";
   if (url.includes("tiktok.com") || url.includes("vm.tiktok.com")) return "tiktok";
@@ -14,10 +15,12 @@ function detectPlatform(url: string) {
 }
 
 const PLATFORM_COLORS: Record<string, string> = {
-  youtube: "#ff0000", tiktok: "#ee1d52", instagram: "#e1306c", twitter: "#1da1f2", other: "#a855f7",
+  youtube: "#ff0000", tiktok: "#ee1d52", instagram: "#e1306c",
+  twitter: "#1da1f2", other: "#a855f7",
 };
 const PLATFORM_LABELS: Record<string, string> = {
-  youtube: "YouTube", tiktok: "TikTok", instagram: "Instagram", twitter: "X / Twitter", other: "Video",
+  youtube: "YouTube", tiktok: "TikTok", instagram: "Instagram",
+  twitter: "X / Twitter", other: "Video",
 };
 
 function PlatformIcon({ platform, size = 18 }: { platform: string; size?: number }) {
@@ -41,7 +44,7 @@ function PlatformIcon({ platform, size = 18 }: { platform: string; size?: number
       <path d="M18.9 1h3.5l-7.6 8.7L23.5 23h-7L11 15.1 4.5 23H1l8.1-9.3L1 1h7.2l5 6.6L18.9 1zm-1.2 19.8h1.9L6.4 3h-2L17.7 20.8z" />
     </svg>
   );
-  return <svg width={size} height={size} viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="8" stroke="#a855f7" strokeWidth="1.5" /><path d="M9 5v4l3 3" stroke="#a855f7" strokeWidth="1.5" strokeLinecap="round" /></svg>;
+  return <svg width={size} height={size} viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="8" stroke="#a855f7" strokeWidth="1.5" /></svg>;
 }
 
 function fmtDuration(s: number) {
@@ -49,37 +52,112 @@ function fmtDuration(s: number) {
   return `${m}:${sec.toString().padStart(2, "0")}`;
 }
 
-type State = "idle" | "loading" | "ready" | "downloading" | "done" | "error";
+// ── Fortschritts-Spinner ───────────────────────────────────────────────────
+function Spinner({ size = 28 }: { size?: number }) {
+  return (
+    <svg className="animate-spin" width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <circle cx="12" cy="12" r="10" stroke="#a855f7" strokeWidth="2" strokeDasharray="40" strokeDashoffset="15" />
+    </svg>
+  );
+}
+
+// ── State-Typen ────────────────────────────────────────────────────────────
+type PageState = "idle" | "loading_info" | "ready" | "importing" | "done" | "error";
+
+interface ImportedVideo {
+  title: string;
+  duration: number;
+  thumbnail: string | null;
+  platform: string;
+}
 
 export default function DownloadPage() {
   const [url, setUrl] = useState("");
-  const [state, setState] = useState<State>("idle");
+  const [state, setState] = useState<PageState>("idle");
   const [info, setInfo] = useState<VideoInfo | null>(null);
-  const [cobaltReady, setCobaltReady] = useState(false);
+  const [importProgress, setImportProgress] = useState(0);
+  const [importStep, setImportStep] = useState("");
+  const [imported, setImported] = useState<ImportedVideo | null>(null);
   const [error, setError] = useState("");
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const platform = detectPlatform(url);
+  const isYouTube = platform === "youtube";
 
+  const stopPoll = () => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  };
+
+  const reset = () => {
+    stopPoll();
+    setUrl(""); setInfo(null); setError("");
+    setImportProgress(0); setImportStep(""); setImported(null);
+    setState("idle");
+  };
+
+  // ── Schritt 1: Video-Info laden ─────────────────────────────────────────
   const handleLoad = async () => {
     if (!url || !platform) return;
-    setState("loading");
+    setState("loading_info");
     setError("");
     setInfo(null);
     try {
       const data = await dlInfo(url);
       setInfo(data);
-      setCobaltReady(!!(data as any).cobalt_ready);
       setState("ready");
     } catch {
-      // Even if info fails, go to ready so user can try download
-      setState("ready");
-      setCobaltReady(false);
+      setState("ready"); // auch ohne Info weitermachen
     }
   };
 
-  const handleDownload = async () => {
+  // ── Schritt 2a: YouTube-Import (über RapidAPI, landet auf unserem Server) ──
+  const handleImportYouTube = useCallback(async () => {
     if (!url) return;
-    setState("downloading");
+    setState("importing");
+    setError("");
+    setImportProgress(5);
+    setImportStep("YouTube-Video wird importiert…");
+
+    let jobId: string;
+    try {
+      const res = await startImport(url);
+      jobId = res.job_id;
+    } catch (e: any) {
+      setError(e.message ?? "Import fehlgeschlagen");
+      setState("error");
+      return;
+    }
+
+    // Polling alle 2 Sekunden
+    stopPoll();
+    pollRef.current = setInterval(async () => {
+      try {
+        const status: ImportStatus = await getImportStatus(jobId);
+        setImportProgress(status.progress ?? 0);
+        setImportStep(status.step ?? "");
+
+        if (status.status === "done" && status.result) {
+          stopPoll();
+          setImported({
+            title:     status.result.title,
+            duration:  status.result.duration,
+            thumbnail: status.result.thumbnail,
+            platform:  status.result.platform,
+          });
+          setState("done");
+        } else if (status.status === "error") {
+          stopPoll();
+          setError(status.error ?? "Unbekannter Fehler");
+          setState("error");
+        }
+      } catch { /* transient — ignore */ }
+    }, 2000);
+  }, [url]);
+
+  // ── Schritt 2b: Direkt-Download für TikTok/Instagram (via Cobalt/yt-dlp) ─
+  const handleDirectDownload = async () => {
+    if (!url) return;
+    setState("importing");
     setError("");
     try {
       const { url: cdnUrl } = await dlGetUrl(url);
@@ -91,25 +169,24 @@ export default function DownloadPage() {
       a.click();
       a.remove();
       setState("done");
+      setImported({
+        title: info?.title ?? "Video",
+        duration: info?.duration ?? 0,
+        thumbnail: info?.thumbnail ?? null,
+        platform: platform ?? "other",
+      });
     } catch (e: any) {
-      const msg: string = e.message ?? "";
-      if (msg.includes("COBALT_NOT_CONFIGURED")) {
-        setError("SETUP_REQUIRED");
-      } else if (
-        (platform === "youtube" || platform === "tiktok") &&
-        (msg.includes("login") || msg.includes("bot") || msg.includes("unavailable") || msg.includes("400"))
-      ) {
-        setError("SERVER_BLOCKED");
-      } else {
-        setError(msg);
-      }
+      setError(e.message ?? "Download fehlgeschlagen");
       setState("error");
     }
   };
 
-  const reset = () => {
-    setUrl(""); setInfo(null); setError(""); setState("idle");
-  };
+  const displayInfo = imported ?? (info ? {
+    title: info.title ?? "",
+    duration: info.duration ?? 0,
+    thumbnail: info.thumbnail ?? null,
+    platform: platform ?? "other",
+  } : null);
 
   return (
     <>
@@ -138,61 +215,27 @@ export default function DownloadPage() {
 
           {/* Platform badges */}
           <div className="flex items-center gap-3 flex-wrap justify-center mb-12">
-            {[
-              { id: "youtube", label: "YouTube" },
-              { id: "tiktok", label: "TikTok" },
-              { id: "instagram", label: "Instagram" },
-              { id: "twitter", label: "X / Twitter" },
-            ].map(p => (
-              <div key={p.id} className="flex items-center gap-2 glass px-4 py-2 rounded-full">
-                <PlatformIcon platform={p.id} size={16} />
-                <span className="text-sm text-chalk-dim">{p.label}</span>
+            {(["youtube","tiktok","instagram","twitter"] as const).map(p => (
+              <div key={p} className="flex items-center gap-2 glass px-4 py-2 rounded-full">
+                <PlatformIcon platform={p} size={16} />
+                <span className="text-sm text-chalk-dim">{PLATFORM_LABELS[p]}</span>
               </div>
             ))}
           </div>
 
-          {/* Main card */}
+          {/* ── Hauptkarte ────────────────────────────────────────────── */}
           <div className="glass rounded-2xl p-6 md:p-8 text-left">
 
-            {/* Error banner */}
-            {error && error !== "SETUP_REQUIRED" && error !== "SERVER_BLOCKED" && (
-              <div className="mb-5 glass rounded-xl px-4 py-3 border border-red-500/30 text-red-400 text-sm">
-                {error}
-              </div>
-            )}
-            {error === "SETUP_REQUIRED" && (
-              <div className="mb-5 glass rounded-xl px-4 py-4 border border-amber-500/30">
-                <p className="text-amber-400 text-sm font-medium mb-1">Downloader wird eingerichtet</p>
-                <p className="text-chalk-dim text-xs">
-                  Der Download-Service wird gerade konfiguriert. In der Zwischenzeit kannst du
-                  {" "}<a href="https://cobalt.tools" target="_blank" className="text-violet-light underline">cobalt.tools</a>{" "}
-                  direkt nutzen — identische Funktion, kostenlos.
-                </p>
-              </div>
-            )}
-            {error === "SERVER_BLOCKED" && (
-              <div className="mb-5 glass rounded-xl px-4 py-4 border border-amber-500/30">
-                <div className="flex items-start gap-3">
-                  <svg className="flex-shrink-0 mt-0.5" width="16" height="16" viewBox="0 0 16 16" fill="none">
-                    <path d="M8 1.5L14.5 13H1.5L8 1.5z" stroke="#f59e0b" strokeWidth="1.3" strokeLinejoin="round"/>
-                    <path d="M8 6v4M8 11.5h.01" stroke="#f59e0b" strokeWidth="1.3" strokeLinecap="round"/>
-                  </svg>
-                  <div>
-                    <p className="text-amber-400 text-sm font-medium mb-1">
-                      {platform === "youtube" ? "YouTube" : "TikTok"} blockiert Server-Downloads
-                    </p>
-                    <p className="text-chalk-dim text-xs leading-relaxed">
-                      {platform === "youtube"
-                        ? "YouTube erlaubt keine Downloads von Server-IPs. Lade das Video direkt über cobalt.tools herunter — selbe Funktion, läuft in deinem Browser."
-                        : "TikTok blockiert Downloads von unserem Server. Nutze cobalt.tools direkt im Browser."
-                      }
-                    </p>
-                  </div>
-                </div>
+            {/* Fehler-Banner */}
+            {error && (
+              <div className="mb-5 glass rounded-xl px-4 py-4 border border-red-500/30">
+                <p className="text-red-400 text-sm font-medium mb-1">Fehler</p>
+                <p className="text-chalk-dim text-xs leading-relaxed">{error}</p>
               </div>
             )}
 
-            {state === "idle" || (state === "error" && error !== "SETUP_REQUIRED" && error !== "SERVER_BLOCKED") ? (
+            {/* ── IDLE / READY: URL-Eingabe ──────────────────────────────── */}
+            {(state === "idle" || state === "loading_info" || state === "ready" || state === "error") && (
               <div className="flex flex-col gap-4">
                 <div className="relative flex items-center">
                   {platform && (
@@ -204,147 +247,181 @@ export default function DownloadPage() {
                     type="url"
                     value={url}
                     onChange={e => { setUrl(e.target.value); if (state === "error") setState("idle"); }}
-                    onKeyDown={e => e.key === "Enter" && handleLoad()}
-                    placeholder="Link hier einfügen…"
+                    onKeyDown={e => e.key === "Enter" && state !== "loading_info" && handleLoad()}
+                    placeholder="YouTube, TikTok oder Instagram Link einfügen…"
                     className={`w-full glass rounded-xl py-4 text-chalk placeholder:text-chalk-dim border border-white/5 focus:border-violet/40 outline-none transition-colors text-base ${platform ? "pl-12 pr-5" : "px-5"}`}
                   />
                 </div>
+
                 {platform && (
                   <div className="flex items-center gap-2 px-1">
                     <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: PLATFORM_COLORS[platform] }} />
-                    <span className="text-xs text-chalk-dim">{PLATFORM_LABELS[platform]} erkannt</span>
+                    <span className="text-xs text-chalk-dim">
+                      {PLATFORM_LABELS[platform]} erkannt
+                      {isYouTube && " — wird über RapidAPI importiert"}
+                    </span>
                   </div>
                 )}
-                <button
-                  onClick={handleLoad}
-                  disabled={!platform}
-                  className="btn-primary w-full py-4 rounded-xl text-base disabled:opacity-40"
-                >
-                  <span>Video laden</span>
-                </button>
-              </div>
-            ) : state === "loading" ? (
-              <div className="flex flex-col items-center gap-4 py-10">
-                <svg className="animate-spin" width="32" height="32" viewBox="0 0 24 24" fill="none">
-                  <circle cx="12" cy="12" r="10" stroke="#a855f7" strokeWidth="2" strokeDasharray="40" strokeDashoffset="15" />
-                </svg>
-                <p className="text-chalk-dim text-sm">Video wird geladen…</p>
-              </div>
-            ) : (state === "ready" || state === "downloading" || state === "done") ? (
-              <div className="flex flex-col gap-5">
-                {/* Video preview (if we have info) */}
-                {info?.title && (
+
+                {/* Video-Info (nach "Video laden") */}
+                {state === "ready" && displayInfo?.title && (
                   <div className="flex gap-4 items-start glass rounded-xl p-4">
-                    {info.thumbnail ? (
-                      <img src={info.thumbnail} alt="" className="w-28 h-16 object-cover rounded-lg flex-shrink-0" />
+                    {displayInfo.thumbnail ? (
+                      <img src={displayInfo.thumbnail} alt="" className="w-28 h-16 object-cover rounded-lg flex-shrink-0" />
                     ) : (
                       <div className="w-28 h-16 glass-violet rounded-lg flex-shrink-0 flex items-center justify-center">
                         <PlatformIcon platform={platform ?? "other"} size={24} />
                       </div>
                     )}
                     <div className="flex-1 min-w-0">
-                      <p className="text-chalk font-medium text-sm leading-tight line-clamp-2 mb-1">{info.title}</p>
-                      <div className="flex items-center gap-3 text-xs text-chalk-dim">
-                        {info.uploader && <span>{info.uploader}</span>}
-                        {info.duration && <span>{fmtDuration(info.duration)}</span>}
-                      </div>
+                      <p className="text-chalk font-medium text-sm leading-tight line-clamp-2 mb-1">{displayInfo.title}</p>
+                      {displayInfo.duration > 0 && (
+                        <span className="text-xs text-chalk-dim">{fmtDuration(displayInfo.duration)}</span>
+                      )}
                     </div>
                   </div>
                 )}
 
-                {state === "done" ? (
-                  <div className="flex flex-col items-center gap-3 py-4">
-                    <div className="w-12 h-12 rounded-full bg-violet/20 border border-violet/40 flex items-center justify-center">
-                      <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-                        <path d="M4 10l4 4 8-8" stroke="#a855f7" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                    </div>
-                    <p className="text-chalk font-medium text-sm">Download gestartet!</p>
-                    <p className="text-chalk-dim text-xs text-center">
-                      Falls der Download nicht automatisch startet, überprüfe deine Download-Einstellungen.
-                    </p>
-                    <button onClick={reset} className="btn-ghost px-5 py-2 rounded-xl text-sm mt-1">
-                      Weiteres Video herunterladen
-                    </button>
+                {state === "idle" || state === "error" ? (
+                  <button
+                    onClick={handleLoad}
+                    disabled={!platform}
+                    className="btn-primary w-full py-4 rounded-xl text-base disabled:opacity-40"
+                  >
+                    <span>Video laden</span>
+                  </button>
+                ) : state === "loading_info" ? (
+                  <div className="flex items-center justify-center gap-3 py-4">
+                    <Spinner size={22} />
+                    <span className="text-chalk-dim text-sm">Video wird geladen…</span>
                   </div>
                 ) : (
+                  /* state === "ready" */
                   <div className="flex gap-3">
-                    <button
-                      onClick={handleDownload}
-                      disabled={state === "downloading"}
-                      className="btn-primary flex-1 py-4 rounded-xl text-base flex items-center justify-center gap-2 disabled:opacity-60"
-                    >
-                      {state === "downloading" ? (
-                        <>
-                          <svg className="animate-spin" width="18" height="18" viewBox="0 0 24 24" fill="none">
-                            <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" strokeDasharray="40" strokeDashoffset="15" />
-                          </svg>
-                          <span>Wird vorbereitet…</span>
-                        </>
-                      ) : (
-                        <>
-                          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-                            <path d="M9 2v10M6 10l3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                            <path d="M2 14h14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                          </svg>
-                          <span>Herunterladen</span>
-                        </>
-                      )}
-                    </button>
+                    {isYouTube ? (
+                      <button
+                        onClick={handleImportYouTube}
+                        className="btn-primary flex-1 py-4 rounded-xl text-base flex items-center justify-center gap-2"
+                      >
+                        <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                          <path d="M9 2v10M6 10l3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                          <path d="M2 14h14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                        </svg>
+                        <span>YouTube-Video herunterladen</span>
+                      </button>
+                    ) : (
+                      <button
+                        onClick={handleDirectDownload}
+                        className="btn-primary flex-1 py-4 rounded-xl text-base flex items-center justify-center gap-2"
+                      >
+                        <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                          <path d="M9 2v10M6 10l3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                          <path d="M2 14h14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                        </svg>
+                        <span>Herunterladen</span>
+                      </button>
+                    )}
                     <button onClick={reset} className="btn-ghost px-5 py-4 rounded-xl text-sm">
                       Zurück
                     </button>
                   </div>
                 )}
               </div>
-            ) : (state === "error" && (error === "SETUP_REQUIRED" || error === "SERVER_BLOCKED")) ? (
-              <div className="flex flex-col gap-4">
-                <div className="relative flex items-center">
-                  {platform && (
-                    <div className="absolute left-4 z-10">
-                      <PlatformIcon platform={platform} size={20} />
+            )}
+
+            {/* ── IMPORTING: Fortschritts-Anzeige ───────────────────────── */}
+            {state === "importing" && (
+              <div className="flex flex-col items-center gap-5 py-6">
+                <Spinner size={40} />
+                <div className="text-center">
+                  <p className="text-chalk font-medium text-sm mb-1">
+                    {isYouTube ? "YouTube-Video wird importiert…" : "Video wird heruntergeladen…"}
+                  </p>
+                  <p className="text-chalk-dim text-xs">{importStep}</p>
+                </div>
+                {importProgress > 0 && (
+                  <div className="w-full max-w-xs">
+                    <div className="h-1 bg-white/5 rounded-full overflow-hidden">
+                      <div
+                        className="h-full rounded-full transition-all duration-700"
+                        style={{ width: `${importProgress}%`, background: "linear-gradient(90deg,#7c3aed,#a855f7)" }}
+                      />
                     </div>
-                  )}
-                  <div className={`w-full glass rounded-xl py-4 text-chalk-dim border border-white/5 text-base ${platform ? "pl-12 pr-5" : "px-5"}`}>
-                    {url.slice(0, 50)}{url.length > 50 ? "…" : ""}
+                    <p className="text-[10px] text-chalk-dim mt-1 text-right font-mono">{importProgress}%</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── DONE ──────────────────────────────────────────────────── */}
+            {state === "done" && (
+              <div className="flex flex-col gap-5">
+                {displayInfo && (
+                  <div className="flex gap-4 items-start glass rounded-xl p-4">
+                    {displayInfo.thumbnail ? (
+                      <img src={displayInfo.thumbnail} alt="" className="w-28 h-16 object-cover rounded-lg flex-shrink-0" />
+                    ) : (
+                      <div className="w-28 h-16 glass-violet rounded-lg flex-shrink-0 flex items-center justify-center">
+                        <PlatformIcon platform={displayInfo.platform} size={24} />
+                      </div>
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-chalk font-medium text-sm leading-tight line-clamp-2 mb-1">{displayInfo.title}</p>
+                      {displayInfo.duration > 0 && (
+                        <span className="text-xs text-chalk-dim">{fmtDuration(displayInfo.duration)}</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex items-center gap-3 glass rounded-xl p-4 border border-violet/20">
+                  <div className="w-10 h-10 rounded-full bg-violet/20 border border-violet/40 flex items-center justify-center flex-shrink-0">
+                    <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                      <path d="M3.5 9l3.5 3.5 7-7" stroke="#a855f7" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </div>
+                  <div>
+                    <p className="text-chalk font-medium text-sm">
+                      {isYouTube ? "YouTube-Video erfolgreich importiert!" : "Download gestartet!"}
+                    </p>
+                    <p className="text-chalk-dim text-xs mt-0.5">
+                      {isYouTube
+                        ? "Du kannst das Video jetzt in den Clip-Editor laden."
+                        : "Das Video wird in deinen Downloads gespeichert."
+                      }
+                    </p>
                   </div>
                 </div>
-                {/* cobalt.tools with URL pre-filled */}
-                <a
-                  href={`https://cobalt.tools/`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="btn-primary w-full py-4 rounded-xl text-base text-center flex items-center justify-center gap-2"
-                  onClick={() => {
-                    // Copy URL to clipboard so user can paste it on cobalt.tools
-                    try { navigator.clipboard.writeText(url); } catch {}
-                  }}
-                >
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                    <path d="M7 2H3a1 1 0 00-1 1v10a1 1 0 001 1h10a1 1 0 001-1V9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-                    <path d="M10 2h4v4M14 2L8 8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                  <span>Auf cobalt.tools herunterladen (Link wird kopiert)</span>
-                </a>
-                <button onClick={reset} className="btn-ghost py-2.5 rounded-xl text-sm">
-                  Zurück
-                </button>
+
+                <div className="flex gap-3">
+                  {isYouTube && (
+                    <a href="/app" className="btn-primary flex-1 py-3 rounded-xl text-sm text-center flex items-center justify-center gap-2">
+                      <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
+                        <path d="M7.5 1l4.5 2.5v5L7.5 11 3 8.5v-5L7.5 1z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+                      </svg>
+                      <span>Im Clip-Editor öffnen</span>
+                    </a>
+                  )}
+                  <button onClick={reset} className="btn-ghost flex-1 py-3 rounded-xl text-sm">
+                    Weiteres Video
+                  </button>
+                </div>
               </div>
-            ) : null}
+            )}
           </div>
 
           <p className="text-xs text-chalk-dim mt-4 text-center">
-            Kein Login nötig · Keine Werbung · Kein Redirect · Direkt herunterladen
+            YouTube via RapidAPI · TikTok & Instagram via yt-dlp · Kein Login nötig
           </p>
         </div>
 
-        {/* Feature grid */}
+        {/* Feature-Grid */}
         <div className="max-w-4xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-4 mb-20">
           {[
             {
-              icon: <svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M11 2L19 6v9l-8 4-8-4V6l8-4z" stroke="#a855f7" strokeWidth="1.5" strokeLinejoin="round" /><path d="M11 11l8-5M11 11v9M11 11L3 6" stroke="#a855f7" strokeWidth="1.5" strokeLinecap="round" /></svg>,
+              icon: <svg width="22" height="22" viewBox="0 0 22 22" fill="none"><path d="M11 2L19 6v9l-8 4-8-4V6l8-4z" stroke="#a855f7" strokeWidth="1.5" strokeLinejoin="round" /></svg>,
               title: "Alle Plattformen",
-              desc: "YouTube, TikTok, Instagram Reels, Twitter/X — alles aus einer Hand.",
+              desc: "YouTube (RapidAPI), TikTok, Instagram Reels, Twitter/X.",
             },
             {
               icon: <svg width="22" height="22" viewBox="0 0 22 22" fill="none"><circle cx="11" cy="11" r="9" stroke="#a855f7" strokeWidth="1.5" /><path d="M7 11l3 3 5-5" stroke="#a855f7" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>,
@@ -352,9 +429,9 @@ export default function DownloadPage() {
               desc: "Keine versteckten Kosten, kein Abo, keine Registrierung erforderlich.",
             },
             {
-              icon: <svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="2" y="2" width="18" height="18" rx="4" stroke="#a855f7" strokeWidth="1.5" /><path d="M7 11h8M11 7v8" stroke="#7c3aed" strokeWidth="1.5" strokeLinecap="round" /></svg>,
+              icon: <svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="2" y="2" width="18" height="18" rx="4" stroke="#a855f7" strokeWidth="1.5" /><path d="M7 11h8" stroke="#7c3aed" strokeWidth="1.5" strokeLinecap="round" /></svg>,
               title: "Keine Werbung",
-              desc: "Kein Pop-up, kein Redirect, keine nervigen Bannerwerbungen.",
+              desc: "Kein Pop-up, kein Redirect, keine nervigen Banner.",
             },
           ].map(f => (
             <div key={f.title} className="glass rounded-2xl p-6">
@@ -365,7 +442,7 @@ export default function DownloadPage() {
           ))}
         </div>
 
-        {/* CTA to clip editor */}
+        {/* CTA zu Clip-Editor */}
         <div className="max-w-3xl mx-auto">
           <div className="glass-violet rounded-2xl p-8 text-center border border-violet/20">
             <h2 className="text-chalk font-bold text-2xl mb-3" style={{ fontFamily: "'Clash Display', sans-serif" }}>
