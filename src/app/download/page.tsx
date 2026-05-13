@@ -2,7 +2,7 @@
 
 import { useState, useRef, useCallback } from "react";
 import Navbar from "@/components/Navbar";
-import { dlInfo, dlProxyUrl, startImport, getImportStatus, type VideoInfo, type ImportStatus } from "@/lib/api";
+import { dlInfo, dlGetUrl, dlProxyUrl, startImport, getImportStatus, type VideoInfo, type ImportStatus } from "@/lib/api";
 
 // ── Plattform-Erkennung ────────────────────────────────────────────────────
 function detectPlatform(url: string) {
